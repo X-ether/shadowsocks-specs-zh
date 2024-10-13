@@ -1,38 +1,44 @@
-# Shadowsocks 2022 Extensible Identity Headers
+# Shadowsocks 2022 扩展身份头（Extensible Identity Headers）
 
-Identity headers are one or more additional layers of headers, each consisting of the next layer's PSK hash. The next layer of an identity header is the next identity header, or the protocol header if it's the last identity header. Identity headers are encrypted with the current layer's identity PSK using an AES block cipher.
+**身份头**是一个或多个额外的头层，每一层都包含下一层 PSK（预共享密钥）的哈希值。每层身份头的下一层可以是另一个身份头，或者如果是最后一层，则是协议头。身份头通过当前层的身份 PSK 使用 AES 分组加密进行加密。
 
-Identity headers are implemented in such a way that's fully backward compatible with current Shadowsocks 2022 implementations. Each identity processor is fully transparent to the next.
+身份头的实现方式完全向现有的 Shadowsocks 2022 版本**兼容**。每一个身份处理器对下一层来说都是透明的。
 
-- iPSKn: The nth identity PSK that identifies the current layer.
-- uPSKn: The nth user PSK that identifies a user on the server.
+- **iPSKn**：表示第 n 层的身份 PSK，用于标识当前层。
+- **uPSKn**：表示第 n 层用户 PSK，用于标识服务器上的某个用户。
+
+---
 
 ## TCP
 
-In TCP requests, identity headers are located between salt and AEAD chunks.
+在 TCP 请求中，身份头位于**盐（salt）**和 **AEAD 块**之间。
 
 ```
 identity_subkey := blake3::derive_key(context: "shadowsocks 2022 identity subkey", key_material: iPSKn + salt)
-plaintext := blake3::hash(iPSKn+1)[0..16] // Take the first 16 bytes of the next iPSK's hash.
+plaintext := blake3::hash(iPSKn+1)[0..16] // 取下一层 iPSK 哈希的前 16 字节。
 identity_header := aes_encrypt(key: identity_subkey, plaintext: plaintext)
 ```
 
+---
+
 ## UDP
 
-In UDP request packets, identity headers are located between the separate header (session ID, packet ID) and AEAD ciphertext.
+在 UDP 请求包中，身份头位于**独立头部（session ID 和 packet ID）**和 **AEAD 密文**之间。
 
-Response packets do not have identity headers.
+响应包不包含身份头。
 
 ```
-plaintext := blake3::hash(iPSKn+1)[0..16] ^ session_id_packet_id // XOR to make it different for each packet.
+plaintext := blake3::hash(iPSKn+1)[0..16] ^ session_id_packet_id // 通过异或操作确保每个包的内容不同。
 identity_header := aes_encrypt(key: iPSKn, plaintext: plaintext)
 ```
 
-For request packets, when iPSKs are used, the separate header MUST be encrypted with the first iPSK. Each identity processor MUST decrypt and re-encrypt the separate header with the next layer's PSK.
+在 UDP 请求包中，如果使用了 iPSKs，则**独立头部必须使用第一个 iPSK 加密**。每一层的身份处理器必须用下一层的 PSK 解密并重新加密独立头部。
 
-For response packets, no special handling is needed for the separate header. The server encrypts the separate header with the user's PSK, per the base spec. Identity processors MUST forward response packets directly to clients without parsing or modifying them.
+在响应包中，独立头部不需要特殊处理。服务器会根据基础规范使用用户的 PSK 加密独立头部。身份处理器必须**直接转发**响应包给客户端，而无需解析或修改。
 
-## Scenarios
+---
+
+## 使用场景
 
 ```
       client0       >---+
@@ -48,18 +54,48 @@ For response packets, no special handling is needed for the separate header. The
    (iPSK0:uPSK3)    >---+
 ```
 
-A set of PSKs, delimited by `:`, are assigned to each client. To send a request, a client MUST generate one identity header for each iPSK.
+每个客户端会分配一组用冒号分隔的 PSK。客户端发送请求时，必须为每个 iPSK 生成一个身份头。
 
-A relay decrypts the first identity header with its identity key, looks up the PSK hash table to find the target server, and relays the remainder of the request.
+- **relay0** 通过其身份密钥解密第一个身份头，从 PSK 哈希表中找到目标服务器，并将请求的剩余部分转发出去。
+- **支持多用户单端口**的服务器使用其身份密钥解密身份头，然后根据用户 PSK 哈希表找到用户 PSK 的加密方式，并处理请求的其余部分。
 
-A single-port-multi-user-capable server decrypts the identity header with its identity key, looks up the user PSK hash table to find the cipher for the user PSK, and processes the remainder of the request.
+在上图中：
+- `client0`、`client1` 和 `client2` 是通过 `relay0` 中继访问 `server0` 的用户。
+- `server1` 是一个不支持身份头的简单服务器，`client3` 通过 `relay0` 连接到它。
 
-In the above graph, `client0`, `client1`, `client2` are users of `server0`, which is relayed through `relay0`. `server1` is a simple server without identity header support. `client3` connects to `server1` via `relay0`.
+---
 
-To start a TCP session, `client0` generates a random salt, encrypts iPSK1's hash with iPSK0-derived subkey as the 1st identity header, encrypts uPSK0's hash with iPSK1-derived subkey as the 2nd identity header, and finishes the remainder of the request following the original spec.
+## TCP 会话示例
 
-To process the TCP request, `relay0` decrypts the 1st identity header with iPSK0-derived subkey, looks up the PSK hash table, and writes the salt and remainder of the request (without the processed identity header) to `server0`.
+1. **client0** 生成一个随机盐。
+2. 使用 **iPSK0** 衍生的子密钥加密 **iPSK1** 的哈希，作为第一个身份头。
+3. 使用 **iPSK1** 衍生的子密钥加密 **uPSK0** 的哈希，作为第二个身份头。
+4. 按照原始规范完成请求的其余部分。
 
-To send a UDP packet, `client0` encrypts the separate header with iPSK0, encrypts (iPSK1's hash XOR session_id_packet_id) with iPSK0 as the 1st identity header, encrypts (uPSK0's hash XOR session_id_packet_id) with iPSK1 as the 2nd identity header, and finishes off following the original spec.
+**relay0** 处理 TCP 请求时：
+1. 使用 **iPSK0** 衍生的子密钥解密第一个身份头。
+2. 从 PSK 哈希表中查找目标服务器，将盐和请求的其余部分（不包括已处理的身份头）发送给 **server0**。
 
-To process the UDP packet, `relay0` decrypts the separate header in-place with iPSK0, decrypts the 1st identity header with iPSK0, looks up the PSK hash table, re-encrypt the separate header into the place of the first identity header, and sends the packet (starting at the re-encrypted separate header) to `server0`.
+---
+
+## UDP 包示例
+
+1. **client0** 使用 **iPSK0** 加密独立头部。
+2. 使用 **iPSK0** 加密 `(iPSK1 的哈希 ^ session_id_packet_id)` 作为第一个身份头。
+3. 使用 **iPSK1** 加密 `(uPSK0 的哈希 ^ session_id_packet_id)` 作为第二个身份头。
+4. 按照原始规范完成请求。
+
+**relay0** 处理 UDP 包时：
+1. 原地解密 **独立头部**（使用 iPSK0）。
+2. 使用 **iPSK0** 解密第一个身份头，从 PSK 哈希表中找到目标服务器。
+3. 将重新加密的独立头部放置在第一个身份头的位置，并将包的剩余部分发送给 **server0**。
+
+---
+
+## 总结
+
+Shadowsocks 2022 的**扩展身份头**机制通过多层 PSK 加密，为中继和服务器之间的身份验证提供了更灵活的支持。  
+- **中继节点**（如 relay0）可以解析和转发多层身份头，确保请求到达正确的目标服务器。  
+- **服务器**可以在支持多用户单端口的情况下，使用用户 PSK 进行加密和解密。
+
+这种设计确保了协议的安全性和灵活性，同时保持与现有 Shadowsocks 2022 实现的**向后兼容性**。
