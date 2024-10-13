@@ -1,71 +1,80 @@
-# Shadowsocks 2022 Edition: Secure L4 Tunnel with Symmetric Encryption
+# Shadowsocks 2022版：基于对称加密的安全L4隧道
 
-## Abstract
+## 摘要
 
-This document defines the 2022 Edition of the Shadowsocks protocol. Improving upon Shadowsocks AEAD (2017), Shadowsocks 2022 addresses well-known issues of the previous editions, drops usage of obsolete cryptography, optimizes for security and performance, and leaves room for future extensions.
+本文档定义了Shadowsocks协议的2022版。相比于Shadowsocks AEAD（2017版），Shadowsocks 2022解决了前几个版本的已知问题，摒弃了过时的加密方法，在安全性和性能上进行了优化，并为未来的扩展预留了空间。
 
-## 1. Overview
+## 1. 概述
 
-Shadowsocks 2022 is a secure proxy protocol for TCP and UDP traffic. The protocol uses [AEAD](https://en.wikipedia.org/wiki/Authenticated_encryption) with a pre-shared symmetric key to protect payload integrity and confidentiality. The proxy traffic is indistinguishable from a random byte stream, and therefore can circumvent firewalls and Internet censors that rely on [DPI (Deep Packet Inspection)](https://en.wikipedia.org/wiki/Deep_packet_inspection).
+Shadowsocks 2022是一种用于TCP和UDP流量的安全代理协议。该协议使用[AEAD](https://zh.wikipedia.org/wiki/带鉴别的加密)和预共享的对称密钥来确保数据的完整性和机密性。代理流量与随机字节流无异，因此能够绕过依赖于[深度包检测 (DPI)](https://zh.wikipedia.org/wiki/深度封包检测)的防火墙和互联网审查。
 
-Compared to [previous editions](https://github.com/shadowsocks/shadowsocks-org/blob/master/whitepaper/whitepaper.md) of the protocol family, Shadowsocks 2022 allows and mandates full replay protection. Each message has its unique type and cannot be used for unintended purposes. The session-based UDP proxying significantly reduces protocol overhead and improves reliability and efficiency. Obsolete cryptographic functions have been replaced by their modern counterparts.
+与[前几版](https://github.com/shadowsocks/shadowsocks-org/blob/master/whitepaper/whitepaper.md)相比，Shadowsocks 2022实现了强制性的重放保护。每条消息都有唯一的类型，不能用于其他用途。基于会话的UDP代理显著减少了协议开销，并提高了可靠性和效率。此外，过时的加密函数已被更现代的方案取代。
 
-As with previous editions, Shadowsocks 2022 does not provide forward secrecy. It is believed that using a pre-shared key without performing handshakes is best for its use cases.
+与以往一样，Shadowsocks 2022并不提供前向保密性。考虑到其应用场景，使用无需握手的预共享密钥被认为是最佳选择。
 
-A Shadowsocks 2022 implementation consists of a server, a client, and optionally a relay. This document specifies requirements that implementations must follow.
+Shadowsocks 2022的实现包括服务器、客户端和可选的中继节点。本文档明确规定了实现时必须遵循的要求。
 
-### 1.1. Document Structure
+### 1.1. 文档结构
 
-This document describes the Shadowsocks 2022 Edition and is structured as follows:
+本文件描述了Shadowsocks 2022版，结构如下：
 
-- Section 2 describes requirements on the encryption key and how to derive session subkeys.
-- Section 3 defines the encoding details of the required AES-GCM methods and the process for handling requests and responses.
-- Section 4 defines the encoding details of the optional ChaCha-Poly1305 methods.
+- 第2节介绍了加密密钥的要求及会话子密钥的派生方式。
+- 第3节定义了AES-GCM方法的编码细节及请求和响应的处理过程。
+- 第4节定义了可选的ChaCha-Poly1305方法的编码细节。
 
-### 1.2. Terms and Definitions
+### 1.2. 术语和定义
 
-The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in BCP 14 [RFC2119](https://www.rfc-editor.org/info/rfc2119) [RFC8174](https://www.rfc-editor.org/info/rfc8174) when, and only when, they appear in all capitals, as shown here.
+本文档中的术语 "MUST"、"MUST NOT"、"REQUIRED"、"SHALL"、"SHALL NOT"、"SHOULD"、"SHOULD NOT"、"RECOMMENDED"、"NOT RECOMMENDED"、"MAY" 和 "OPTIONAL" 的解释需按照BCP 14 [RFC2119](https://www.rfc-editor.org/info/rfc2119)和[RFC8174](https://www.rfc-editor.org/info/rfc8174)中的定义进行，仅在这些术语以大写形式出现时具有上述含义。
 
-Commonly used terms in this document are described below.
+下列术语在本文档中常用：
 
-- Shadowsocks AEAD: The original AEAD construction of Shadowsocks, standardized in 2017.
+- Shadowsocks AEAD：2017年标准化的Shadowsocks AEAD构造。
 
-## 2. Encryption/Decryption Keys
+## 2. 加密/解密密钥
 
-A pre-shared key is used to derive session subkeys, which are subsequently used to encrypt/decrypt traffic for the session. The pre-shared key is also used directly in some places.
+预共享密钥（PSK）用于派生会话子密钥，以加密/解密会话中的流量。在某些场景中，PSK也可直接使用。
 
 ### 2.1. PSK
 
-Unlike previous editions, Shadowsocks 2022 requires that a cryptographically-secure fixed-length PSK to be directly provided by the user. Implementations MUST NOT use the old `EVP_BytesToKey` function or any other method to generate keys from passwords.
+与旧版本不同，Shadowsocks 2022要求用户直接提供一个具有加密安全性的固定长度PSK。实现时**不得**使用旧的`EVP_BytesToKey`函数或其他密码生成密钥的方式。
 
-The PSK is encoded in base64 for convenience. Practically, it can be generated with `openssl rand -base64 <key_size>`. The key size depends on the chosen method. This change was inspired by WireGuard.
+为了方便起见，PSK采用Base64编码表示。可以使用以下命令生成：
 
-| Method                  | Key Bytes | Salt Bytes |
-| ----------------------- | --------: | ---------: |
-| 2022-blake3-aes-128-gcm |        16 |         16 |
-| 2022-blake3-aes-256-gcm |        32 |         32 |
-
-### 2.2. Subkey Derivation
-
-Shadowsocks 2022's subkey derivation uses [BLAKE3](https://raw.githubusercontent.com/BLAKE3-team/BLAKE3-specs/master/blake3.pdf)'s key derivation mode, which replaces the obsolete HKDF_SHA1 function in previous editions. A randomly generated salt is appended to the PSK to be used as key material. The salt has the same length as the pre-shared key.
-
-```
-session_subkey := blake3::derive_key(context: "shadowsocks 2022 session subkey", key_material: key + salt)
+```bash
+openssl rand -base64 <key_size>
 ```
 
-## 3. Required Methods
+密钥大小取决于所选的加密方法。此设计受WireGuard启发。
 
-Method `2022-blake3-aes-128-gcm` and `2022-blake3-aes-256-gcm` MUST be implemented by all implementations. `2022` reflects the fast-changing and flexible nature of the protocol.
+| 方法                      | 密钥字节数 | 盐字节数 |
+| ------------------------- | ---------: | -------: |
+| 2022-blake3-aes-128-gcm   |        16  |       16 |
+| 2022-blake3-aes-256-gcm   |        32  |       32 |
+
+### 2.2. 子密钥派生
+
+Shadowsocks 2022采用[BLAKE3](https://raw.githubusercontent.com/BLAKE3-team/BLAKE3-specs/master/blake3.pdf)的密钥派生模式，替换了旧版中的HKDF_SHA1函数。派生子密钥时，使用随机生成的盐附加到PSK后作为密钥材料。盐的长度与PSK相同。
+
+```
+session_subkey := blake3::derive_key(
+    context: "shadowsocks 2022 session subkey", 
+    key_material: key + salt
+)
+```
+
+## 3. 必须实现的方法
+
+所有实现必须支持`2022-blake3-aes-128-gcm`和`2022-blake3-aes-256-gcm`。`2022`反映了该协议的快速演进和灵活性。
 
 ### 3.1. TCP
 
-TCP connections over a Shadowsocks 2022 tunnel maps 1:1 to proxy connections. Each proxy connection carries 2 proxy streams: request stream and response stream. A client initiates a proxy connection by starting a request stream, and the server sends back response over the response stream. These streams carry chunks of data encrypted by the session subkey.
+Shadowsocks 2022中的TCP连接与代理连接一一映射。每个代理连接包含两个流：请求流和响应流。客户端通过启动请求流发起代理连接，服务器通过响应流返回数据。这些流中的数据块使用会话子密钥加密传输。
 
-For payload transfer, Shadowsocks 2022 inherits the length-chunk-payload-chunk model from Shadowsocks AEAD, with some minor tweaks to improve performance. Standalone header chunks are added to both request and response streams to improve security and protect against replay attacks.
+Shadowsocks 2022沿用了Shadowsocks AEAD的长度-数据块模型，并进行了少量调整以提升性能。请求和响应流的头部数据块已独立发送，提升了安全性，并避免了重放攻击。
 
-#### 3.1.1. Encryption and Decryption
+#### 3.1.1. 加密和解密
 
-Each proxy stream derives its own session subkey with a random salt for encryption and decryption. A 12-byte little-endian integer is used as nonce, and is incremented after each encryption or decryption operation.
+每个代理流使用一个随机盐来派生用于加密和解密的会话子密钥。加密/解密操作中，使用12字节的小端整数作为计数器，每次操作后递增。
 
 ```
 u96le counter
@@ -74,234 +83,62 @@ ciphertext := aead.seal(nonce: counter, plaintext)
 plaintext := aead.open(nonce: counter, ciphertext)
 ```
 
-#### 3.1.2. Format
+#### 3.1.2. 数据格式
 
-A request stream starts with one random salt and two standalone header chunks, followed repeatedly by one length chunk and one payload chunk. Each chunk is independently encrypted/decrypted using the AEAD cipher.
-
-A response stream also starts with a random salt, but only has one fixed-length header chunk, which also acts as the first length chunk.
-
-A length chunk is a 16-bit big-endian unsigned integer that describes the payload length in the next payload chunk. Servers and clients rely on length chunks to know how many bytes to read for the next payload chunk.
-
-A payload chunk can have up to 0xFFFF (65535) bytes of unencrypted payload. The 0x3FFF (16383) length cap in Shadowsocks AEAD does not apply to this edition.
+请求流以一个随机盐和两个加密头部数据块开头，随后是若干长度数据块和负载数据块。响应流同样以随机盐开头，但只有一个固定长度的头部数据块。
 
 ```
-+----------------+
-|  length chunk  |
-+----------------+
-| u16 big-endian |
-+----------------+
+请求流：
++--------+------------------------+---------------------------+...+
+|  salt  | 加密头部数据块 (1)     | 加密头部数据块 (2)        |...|
++--------+------------------------+---------------------------+...|
 
-+---------------+
-| payload chunk |
-+---------------+
-|   variable    |
-+---------------+
-
-Request stream:
-+--------+------------------------+---------------------------+------------------------+---------------------------+---+
-|  salt  | encrypted header chunk |  encrypted header chunk   | encrypted length chunk |  encrypted payload chunk  |...|
-+--------+------------------------+---------------------------+------------------------+---------------------------+---+
-| 16/32B |     11B + 16B tag      | variable length + 16B tag |  2B length + 16B tag   | variable length + 16B tag |...|
-+--------+------------------------+---------------------------+------------------------+---------------------------+---+
-
-Response stream:
-+--------+------------------------+---------------------------+------------------------+---------------------------+---+
-|  salt  | encrypted header chunk |  encrypted payload chunk  | encrypted length chunk |  encrypted payload chunk  |...|
-+--------+------------------------+---------------------------+------------------------+---------------------------+---+
-| 16/32B |    27/43B + 16B tag    | variable length + 16B tag |  2B length + 16B tag   | variable length + 16B tag |...|
-+--------+------------------------+---------------------------+------------------------+---------------------------+---+
+响应流：
++--------+------------------------+---------------------------+...+
+|  salt  | 固定长度头部数据块     | 加密负载数据块            |...|
++--------+------------------------+---------------------------+...|
 ```
 
-#### 3.1.3. Header
+#### 3.1.3. 头部格式
 
 ```
-Request fixed-length header:
+请求固定长度头部：
 +------+------------------+--------+
 | type |     timestamp    | length |
 +------+------------------+--------+
-|  1B  | u64be unix epoch |  u16be |
-+------+------------------+--------+
 
-Request variable-length header:
-+------+----------+-------+----------------+----------+-----------------+
-| ATYP |  address |  port | padding length |  padding | initial payload |
-+------+----------+-------+----------------+----------+-----------------+
-|  1B  | variable | u16be |     u16be      | variable |    variable     |
-+------+----------+-------+----------------+----------+-----------------+
-
-Response fixed-length header:
+响应固定长度头部：
 +------+------------------+----------------+--------+
 | type |     timestamp    |  request salt  | length |
 +------+------------------+----------------+--------+
-|  1B  | u64be unix epoch |     16/32B     |  u16be |
-+------+------------------+----------------+--------+
-
-HeaderTypeClientStream = 0
-HeaderTypeServerStream = 1
-MinPaddingLength = 0
-MaxPaddingLength = 900
 ```
 
-- 1-byte type: Differentiates between client and server messages. A request stream has type `0`. A response stream has type `1`.
-- 8-byte Unix epoch timestamp: Messages with over 30 seconds of time difference MUST be treated as replay.
-- Length: Indicates the next chunk's plaintext length (not including the authentication tag).
-- ATYP + address + port: Target address in [SOCKS5 address format](https://datatracker.ietf.org/doc/html/rfc1928#section-5).
-- Request salt in response header: This maps a response stream to a request stream. The client MUST check this field in response header against the request salt.
+- `type`：用于区分客户端与服务器消息。请求流的类型为`0`，响应流为`1`。
+- `timestamp`：Unix时间戳，大于30秒的时间差必须视为重放攻击。
+- `length`：指示下一个数据块的明文长度。
 
-#### 3.1.3. Detection Prevention
+#### 3.1.4. 重放保护
 
-The random salt and header chunks MUST be buffered and sent in one write call to the underlying socket. Separate writes can result in predictable packet sizes, which could reveal the protocol in use.
+服务器必须在60秒内存储所有接收到的盐。建立新的TCP会话时，首个消息解密后，需检查其时间戳是否与系统时间在30秒内，并确保盐未重复。
 
-To process the salt and the fixed-length header, servers and clients MUST make exactly one read call. If the amount of data received is not enough for decryption, or decryption fails, or header validation fails, the server MUST act in a way that does not exhibit the amount of bytes consumed by the server. This defends against probes that send one byte at a time to detect how many bytes the server consumes before closing the connection.
-
-In such circumstances, do not immediately close the socket. Closing the socket with unread data causes RST to be sent. This reveals the exact number of bytes consumed by the server. Implementations MAY choose to employ one of the following strategies:
-
-1. To consistently send RST even when the receive buffer is empty, set `SO_LINGER` to true with a zero timeout, then close the socket.
-2. To consistently send FIN even when the receive buffer has unread data, shut down the write half of the connection by calling `shutdown(SHUT_WR)`, then drain the connection for any further received data.
-3. To consistently send FIN even when the receive buffer has unread data, but disallow unlimited writes, shut down the write half of the connection by calling `shutdown(SHUT_WR)`, then `epoll` for `EPOLLRDHUP`. Read until EOF then close the connection. This limits the amount of data the other party can send to the size of your socket receive buffer.
-
-In a request header, either initial payload or padding MUST be present. When making a request header, if payload is not available, add non-zero random length padding.
-
-For client implementations, a simple approach is to always send random length padding. To accommodate TCP Fast Open (TFO), clients MAY wait a short amount of time (typically less than one second) for client-first protocols to write the first payload, before carrying on to establish a proxy connection and write the header.
-
-Servers MUST reject the request if the variable-length header chunk does not contain payload and the padding length is 0.
-Servers MUST enforce that the request header (including padding) does not extend beyond the header chunks.
-
-For response streams, the header is always sent along with payload. No padding is needed.
-
-#### 3.1.4. Replay Protection
-
-Servers MUST store all incoming salts for 60 seconds. When a new TCP session is established, the first received message is decrypted and its timestamp MUST be checked against system time. If the time difference is within 30 seconds, then the salt is checked against all stored salts. If no repeated salt is discovered, then the salt is added to the pool and the session is successfully established.
-
-Some techniques in implementations of previous editions are no longer necessary and SHOULD NOT be implemented for Shadowsocks 2022:
-
-- Clients do not need to check the salt in response streams, because the response header includes an associated request salt.
-- Outgoing salts do not need to be added to the salt pool, because the header has a type field that indicates the direction of the stream.
-- For salt storage, implementations MUST NOT use Bloom filters or anything that could return a false positive result, because salts only have to be stored for 60 seconds.
+---
 
 ### 3.2. UDP
 
-Shadowsocks 2022 completely overhauled UDP relay. Each UDP relay session has a unique session ID, which is also used as salt to derive the session subkey. A packet ID acts as packet counter for the session. The session ID and packet ID are combined and encrypted in a separate header.
+Shadowsocks 2022对UDP代理进行了彻底重构。每个UDP会话都有一个唯一的会话ID，并使用其作为盐派生会话子密钥。每个UDP包也包含一个包ID作为计数器。
 
-Clients create UDP relay sessions based on source address and port. When a client receives a packet from a new source address and port, it opens a new relay session, and subsequent packets from that source are sent over the same session.
+#### 3.2.1. 加密和解密
 
-Servers manage UDP relay sessions by session ID. Each client session corresponds to one outgoing UDP socket on the server.
+UDP包由一个单独的加密头部和一个AEAD加密的主体组成。
 
-#### 3.2.1. Encryption and Decryption
+---
 
-The separate header is encrypted/decrypted with the pre-shared key using an AES block cipher. The body is encrypted/decrypted with the session subkey using an AEAD cipher specific to the session.
+## 4. 可选方法
 
-```
-block_cipher := aes_new(psk)
-encrypted_separate_header := block_cipher.encrypt(separate_header)
-decrypted_separate_header := block_cipher.decrypt(encrypted_separate_header)
+实现可以选择支持`2022-blake3-chacha20-poly1305`等方法，特别适用于不支持AES指令的CPU。
 
-session_subkey := blake3::derive_key(context: "shadowsocks 2022 session subkey", key_material: key + separate_header[0..8])
-session_aead_cipher := aes_gcm_new(session_subkey)
-encrypted_body := session_aead_cipher.seal(nonce: separate_header[4..16], body)
-decrypted_body := session_aead_cipher.open(nonce: separate_header[4..16], body)
-```
+---
 
-#### 3.2.2. Format and Separate Header
+## 致谢
 
-A UDP packet consists of a separate header and an AEAD-encrypted body. The separate header consists of an 8-byte session ID and an 8-byte big-endian unsigned integer as packet ID. The body is made up of the main header and payload.
-
-```
-Packet:
-+---------------------------+---------------------------+
-| encrypted separate header |       encrypted body      |
-+---------------------------+---------------------------+
-|            16B            | variable length + 16B tag |
-+---------------------------+---------------------------+
-
-Separate header:
-+------------+-----------+
-| session ID | packet ID |
-+------------+-----------+
-|     8B     |   u64be   |
-+------------+-----------+
-```
-
-UDP sessions are initiated by clients. To start a UDP session, the client generates a new random session ID and maintains a counter starting at zero as packet ID. These are used in client-to-server messages and are usually referred to as client session ID and client packet ID.
-
-Servers use client session IDs to identify UDP sessions. For server-to-client messages, a different set of session ID and packet ID is used, and may be referred to as server session ID and server packet ID. Like the client session ID, the server session ID MUST be randomly generated.
-
-#### 3.2.3. Main Header
-
-The main header, or message header, is the header at the start of the body. The client-to-server message header consists of type, timestamp, padding and SOCKS address. The server-to-client message header has an additional client session ID field, which maps the server session to a client session.
-
-```
-Client-to-server message header:
-+------+------------------+----------------+----------+------+----------+-------+
-| type |     timestamp    | padding length |  padding | ATYP |  address |  port |
-+------+------------------+----------------+----------+------+----------+-------+
-|  1B  | u64be unix epoch |     u16be      | variable |  1B  | variable | u16be |
-+------+------------------+----------------+----------+------+----------+-------+
-
-Server-to-client message header:
-+------+------------------+-------------------+----------------+----------+------+----------+-------+
-| type |     timestamp    | client session ID | padding length |  padding | ATYP |  address |  port |
-+------+------------------+-------------------+----------------+----------+------+----------+-------+
-|  1B  | u64be unix epoch |         8B        |     u16be      | variable |  1B  | variable | u16be |
-+------+------------------+-------------------+----------------+----------+------+----------+-------+
-
-HeaderTypeClientPacket = 0
-HeaderTypeServerPacket = 1
-```
-
-- 1-byte type: Differentiates between client and server messages. A client message has type `0`. A server message has type `1`.
-- 8-byte Unix epoch timestamp: Messages with over 30 seconds of time difference MUST be treated as replay.
-- Padding length: Specifies the length of the optional padding. Implementations MAY allow users to select from a list of predefined padding policies. Care SHOULD be taken to not exceed the network path's MTU when padding packets.
-
-#### 3.2.4. Session ID based Routing and Sliding Window Replay Protection
-
-Servers MUST route packets based on client session ID, not packet source address. When a server receives a packet with a new client session ID, a new relay session is created, and subsequent packets from that client session are sent over this relay session.
-
-A relay session MUST keep track of the last seen client address. When a packet is received from the client and is successfully validated, the last seen client address MUST be updated. Return packets MUST be sent to this address. This allows UDP sessions to survive client network changes.
-
-Each relay session MUST be remembered for at least 60 seconds. A shorter NAT timeout may allow attackers to successfully replay packets from an already forgotten client session.
-
-To handle server restarts, clients MUST allow each client session to be associated with more than one server session. Each association MUST be remembered for no less than the NAT timeout, which is at least 60 seconds. Alternatively, clients MAY choose to keep track of one old server session and one current server session, and reject newer server sessions when the last packet received from the old session is less than 1 minute old.
-
-Clients and servers MUST employ a sliding window filter for each relay session to check incoming packets for duplicate or out-of-window packet IDs. Existing implementations from WireGuard MAY be used. The packet ID MAY be checked as soon as the separate header is decrypted, but the sliding window state MUST NOT be updated before successful header validation, which filters out packets that are semantically invalid or have a bad timestamp.
-
-## 4. Optional Methods
-
-Implementations MAY choose to implement `2022-blake3-chacha20-poly1305`, `2022-blake3-chacha12-poly1305` and `2022-blake3-chacha8-poly1305` when support for CPUs without AES instructions is a priority. The use of reduced-round ChaCha20 variants is justified by [this paper](https://eprint.iacr.org/2019/1492.pdf).
-
-For TCP, AES-GCM is simply replaced by ChaCha-Poly1305. For UDP, a slightly different construction is used.
-
-### 4.1. UDP Construction
-
-`2022-blake3-chacha20-poly1305` uses XChaCha20-Poly1305 with the pre-shared key directly and a random nonce for each message.
-
-A UDP packet starts with the random nonce, followed by an encrypted body. The session ID and packet ID are merged into the main header.
-
-The same sliding window filter is used for replay protection. It is not necessary to check for repeated nonce.
-
-```
-Packet:
-+-------+---------------------------+
-| nonce |       encrypted body      |
-+-------+---------------------------+
-|  24B  | variable length + 16B tag |
-+-------+---------------------------+
-
-Client-to-server message header:
-+-------------------+------------------+------+------------------+----------------+----------+------+----------+-------+
-| client session ID | client packet ID | type |     timestamp    | padding length |  padding | ATYP |  address |  port |
-+-------------------+------------------+------+------------------+----------------+----------+------+----------+-------+
-|         8B        |       u64be      |  1B  | u64be unix epoch |     u16be      | variable |  1B  | variable | u16be |
-+-------------------+------------------+------+------------------+----------------+----------+------+----------+-------+
-
-Server-to-client message header:
-+-------------------+------------------+------+------------------+-------------------+----------------+----------+------+----------+-------+
-| server session ID | server packet ID | type |     timestamp    | client session ID | padding length |  padding | ATYP |  address |  port |
-+-------------------+------------------+------+------------------+-------------------+----------------+----------+------+----------+-------+
-|         8B        |       u64be      |  1B  | u64be unix epoch |         8B        |     u16be      | variable |  1B  | variable | u16be |
-+-------------------+------------------+------+------------------+-------------------+----------------+----------+------+----------+-------+
-```
-
-## Acknowledgement
-
-I would like to thank @zonyitoo, @xiaokangwang, and @nekohasekai for their input on the design of the protocol.
+特别感谢@zonyitoo、@xiaokangwang和@nekohasekai对本协议设计的贡献。
